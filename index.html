@@ -6,15 +6,20 @@
     <title>설계자 핵심 역량 진단</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script type="module">
-        // Firebase CDN Imports
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-        
+
+    <!-- Firebase CDN (Compatibility Mode for Global Exposure) -->
+    <!-- GitHub Pages의 안정성을 위해 전역 변수로 노출되는 호환성 버전을 사용합니다. -->
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-firestore-compat.js"></script>
+    
+    <!-- NOTE: type="module" 제거, 일반 스크립트로 실행 -->
+    <script>
         // Firestore 로깅 활성화 (디버그용)
-        setLogLevel('Debug');
+        // Global functions are now available via the firebase namespace
+        if (typeof firebase !== 'undefined' && firebase.firestore) {
+             firebase.firestore.setLogLevel('Debug');
+        }
 
         // Global Firebase Variables (Provided by Canvas Environment)
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
@@ -82,30 +87,33 @@
         // --- Firebase/Auth/Firestore Initialization and Data Handling ---
 
         async function initFirebase() {
-            const hasValidConfig = Object.keys(firebaseConfig).length > 0 && firebaseConfig.apiKey;
+            const hasValidConfig = typeof firebase !== 'undefined' && Object.keys(firebaseConfig).length > 0 && firebaseConfig.apiKey;
 
             if (hasValidConfig) {
                 // 1. 캔버스 환경 (Firebase 활성화)
                 isFirebaseActive = true;
                 try {
-                    const app = initializeApp(firebaseConfig);
-                    auth = getAuth(app);
-                    db = getFirestore(app);
+                    const app = firebase.initializeApp(firebaseConfig);
+                    auth = firebase.auth();
+                    db = firebase.firestore();
 
-                    await setPersistence(auth, browserLocalPersistence);
+                    // setPersistence는 auth 객체를 통해 호출
+                    await auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL);
 
                     if (initialAuthToken) {
-                        await signInWithCustomToken(auth, initialAuthToken);
+                        await auth.signInWithCustomToken(initialAuthToken);
                     } else {
-                        await signInAnonymously(auth);
+                        await auth.signInAnonymously();
                     }
 
-                    onAuthStateChanged(auth, (user) => {
+                    // onAuthStateChanged는 auth 객체를 통해 호출
+                    auth.onAuthStateChanged((user) => {
                         if (user) {
                             userId = user.uid;
                             document.getElementById('user-info').innerText = `사용자 ID: ${userId}`;
                             setupFirestoreListener();
                         } else {
+                            // 인증 실패 시 익명 ID 사용
                             userId = crypto.randomUUID(); 
                             document.getElementById('user-info').innerText = `사용자 ID: (익명) ${userId.substring(0, 8)}...`;
                         }
@@ -115,27 +123,39 @@
                 } catch (error) {
                     console.error("Firebase 초기화 또는 로그인 실패:", error);
                     isFirebaseActive = false; // 오류 시 비활성화
-                    handleLocalMode();
+                    handleLocalMode('오류: Firebase 초기화 또는 인증 실패.');
                 }
             } else {
                 // 2. 외부 환경 (GitHub Pages 등 - 로컬 모드 활성화)
-                handleLocalMode();
+                handleLocalMode('경고: Firebase 설정 누락으로 데이터가 저장되지 않습니다.');
             }
         }
         
-        function handleLocalMode() {
+        function handleLocalMode(message) {
             console.warn("Firebase 설정 누락. 데이터를 저장하지 않는 로컬 모드로 실행됩니다.");
             userId = crypto.randomUUID(); // 로컬 세션 ID 생성
             document.getElementById('user-info').innerText = `사용자 ID: (로컬) ${userId.substring(0, 8)}... (저장 기능 비활성화)`;
-            document.getElementById('status-message').innerHTML = '<span class="text-red-600 font-bold">경고:</span> Firebase 설정 누락으로 데이터가 저장되지 않습니다.';
+            
+            // 이미지에서 보인 에러 메시지와 유사한 형태로 표시
+            const statusElement = document.getElementById('status-message');
+            if (message.startsWith('경고:')) {
+                statusElement.innerHTML = `<span class="text-red-600 font-bold">${message.substring(0, 3)}</span>${message.substring(3)}`;
+            } else {
+                statusElement.innerHTML = `<span class="text-red-600 font-bold">오류:</span> Firebase 로드 실패, 데이터를 저장할 수 없습니다.`;
+            }
+            
             // 초기 렌더링
             renderQuiz(); 
             renderScoreSummary();
+            drawRadarChart(currentScores); // 로컬 모드에서는 0점으로 초기화된 차트 표시
         }
 
         function getPrivateDocRef(dbInstance, uid) {
-            // Path: /artifacts/{appId}/users/{userId}/designer_skills/user_scores
-            return doc(dbInstance, 'artifacts', appId, 'users', uid, COLLECTION_NAME, DOCUMENT_ID);
+            // Compatibility Mode Path: /artifacts/{appId}/users/{userId}/designer_skills/user_scores
+            return dbInstance
+                .collection('artifacts').doc(appId)
+                .collection('users').doc(uid)
+                .collection(COLLECTION_NAME).doc(DOCUMENT_ID);
         }
 
         function setupFirestoreListener() {
@@ -143,15 +163,15 @@
 
             const docRef = getPrivateDocRef(db, userId);
 
-            // Real-time listener for user scores
-            onSnapshot(docRef, (docSnap) => {
-                if (docSnap.exists()) {
+            // Real-time listener for user scores (onSnapshot은 docRef에서 호출)
+            docRef.onSnapshot((docSnap) => {
+                if (docSnap.exists) {
                     const data = docSnap.data();
                     console.log("Loaded existing data:", data);
                     
                     userResponses = data.responses || {};
                     currentScores = data.scores || {};
-                    latestTimestamp = data.timestamp ? new Date(data.timestamp.seconds * 1000) : null;
+                    latestTimestamp = data.timestamp ? data.timestamp.toDate() : null; // Firestore Timestamp를 Date로 변환
 
                     renderQuiz();
                     drawRadarChart(currentScores); 
@@ -179,12 +199,13 @@
             const dataToSave = {
                 scores: scores,
                 responses: responses,
-                timestamp: new Date()
+                timestamp: firebase.firestore.FieldValue.serverTimestamp() // 서버 타임스탬프 사용
             };
 
             try {
                 const docRef = getPrivateDocRef(db, userId);
-                await setDoc(docRef, dataToSave, { merge: false });
+                // setDoc 대신 docRef.set() 사용 (호환성 모드)
+                await docRef.set(dataToSave, { merge: false });
                 document.getElementById('status-message').innerText = '결과가 성공적으로 저장되었습니다.';
             } catch (error) {
                 console.error("Error saving data:", error);
@@ -253,12 +274,16 @@
             const listContainer = document.getElementById('score-summary-list');
             if (!listContainer) return;
             
-            const summaryHtml = COMPETENCIES.map(c => `
-                <li class="flex justify-between items-center p-3 bg-indigo-50 rounded-lg shadow-sm">
-                    <span class="font-medium text-lg text-indigo-800">${c.label}</span>
-                    <span id="score-${c.id}" class="text-2xl font-extrabold text-indigo-600">0.0</span>
-                </li>
-            `).join('');
+            // 템플릿 리터럴이 깨지는 문제를 방지하기 위해 HTML 구조를 명확하게 작성
+            const summaryHtml = COMPETENCIES.map(c => {
+                 const scoreId = `score-${c.id}`;
+                 return `
+                    <li class="flex justify-between items-center p-3 bg-indigo-50 rounded-lg shadow-sm">
+                        <span class="font-medium text-lg text-indigo-800">${c.label}</span>
+                        <span id="${scoreId}" class="text-2xl font-extrabold text-indigo-600">0.0</span>
+                    </li>
+                `;
+            }).join('');
 
             listContainer.innerHTML = summaryHtml;
             updateScoreSummary(); // 초기 점수를 0.0으로 설정하거나 불러온 값으로 설정
@@ -386,7 +411,9 @@
              if (!isFirebaseActive) return; // 로컬 모드에서는 별도의 메시지 표시
 
              if (latestTimestamp) {
-                statusElement.innerHTML = `<span class="text-green-600 font-bold">저장됨:</span> ${latestTimestamp.toLocaleString('ko-KR')} 기준의 결과입니다.`;
+                // toLocaleString() 호출 전 timestamp가 Date 객체인지 확인
+                const timeString = latestTimestamp instanceof Date ? latestTimestamp.toLocaleString('ko-KR') : '시간 정보 없음';
+                statusElement.innerHTML = `<span class="text-green-600 font-bold">저장됨:</span> ${timeString} 기준의 결과입니다.`;
              } else if (Object.keys(currentScores).length > 0) {
                  statusElement.innerHTML = `현재 진행 중인 응답을 반영하고 있습니다.`;
              } else {
