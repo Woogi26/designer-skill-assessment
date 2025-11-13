@@ -34,6 +34,7 @@
         let chartInstance = null;
         const COLLECTION_NAME = 'designer_skills';
         const DOCUMENT_ID = 'user_scores';
+        let isFirebaseActive = false; // Firebase 활성화 상태 플래그
 
         // 6가지 핵심 역량 정의
         const COMPETENCIES = [
@@ -81,42 +82,55 @@
         // --- Firebase/Auth/Firestore Initialization and Data Handling ---
 
         async function initFirebase() {
-            try {
-                const app = initializeApp(firebaseConfig);
-                auth = getAuth(app);
-                db = getFirestore(app);
+            const hasValidConfig = Object.keys(firebaseConfig).length > 0 && firebaseConfig.apiKey;
 
-                // Set persistence to local storage
-                await setPersistence(auth, browserLocalPersistence);
+            if (hasValidConfig) {
+                // 1. 캔버스 환경 (Firebase 활성화)
+                isFirebaseActive = true;
+                try {
+                    const app = initializeApp(firebaseConfig);
+                    auth = getAuth(app);
+                    db = getFirestore(app);
 
-                // Initial authentication check
-                if (initialAuthToken) {
-                    await signInWithCustomToken(auth, initialAuthToken);
-                } else {
-                    await signInAnonymously(auth);
-                }
+                    await setPersistence(auth, browserLocalPersistence);
 
-                // Listen for Auth state changes
-                onAuthStateChanged(auth, (user) => {
-                    if (user) {
-                        userId = user.uid;
-                        document.getElementById('user-info').innerText = `사용자 ID: ${userId}`;
-                        setupFirestoreListener();
-                        renderQuiz(); // Render quiz once auth is ready
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
                     } else {
-                        // User is signed out or anonymous
-                        userId = crypto.randomUUID(); // Fallback for anonymous state if sign-in fails
-                        document.getElementById('user-info').innerText = `사용자 ID: (익명) ${userId.substring(0, 8)}...`;
-                        renderQuiz(); // Render quiz even without full auth
+                        await signInAnonymously(auth);
                     }
-                    renderScoreSummary(); // Initialize the score list structure
-                });
-            } catch (error) {
-                console.error("Firebase initialization or sign-in failed:", error);
-                document.getElementById('status-message').innerText = '오류: Firebase 로드 실패. 데이터를 저장할 수 없습니다.';
-                renderQuiz();
-                renderScoreSummary();
+
+                    onAuthStateChanged(auth, (user) => {
+                        if (user) {
+                            userId = user.uid;
+                            document.getElementById('user-info').innerText = `사용자 ID: ${userId}`;
+                            setupFirestoreListener();
+                        } else {
+                            userId = crypto.randomUUID(); 
+                            document.getElementById('user-info').innerText = `사용자 ID: (익명) ${userId.substring(0, 8)}...`;
+                        }
+                        renderQuiz();
+                        renderScoreSummary();
+                    });
+                } catch (error) {
+                    console.error("Firebase 초기화 또는 로그인 실패:", error);
+                    isFirebaseActive = false; // 오류 시 비활성화
+                    handleLocalMode();
+                }
+            } else {
+                // 2. 외부 환경 (GitHub Pages 등 - 로컬 모드 활성화)
+                handleLocalMode();
             }
+        }
+        
+        function handleLocalMode() {
+            console.warn("Firebase 설정 누락. 데이터를 저장하지 않는 로컬 모드로 실행됩니다.");
+            userId = crypto.randomUUID(); // 로컬 세션 ID 생성
+            document.getElementById('user-info').innerText = `사용자 ID: (로컬) ${userId.substring(0, 8)}... (저장 기능 비활성화)`;
+            document.getElementById('status-message').innerHTML = '<span class="text-red-600 font-bold">경고:</span> Firebase 설정 누락으로 데이터가 저장되지 않습니다.';
+            // 초기 렌더링
+            renderQuiz(); 
+            renderScoreSummary();
         }
 
         function getPrivateDocRef(dbInstance, uid) {
@@ -125,7 +139,7 @@
         }
 
         function setupFirestoreListener() {
-            if (!db || !userId || userId === 'anonymous') return;
+            if (!isFirebaseActive) return; // Firebase 비활성화 시 리스너 등록하지 않음
 
             const docRef = getPrivateDocRef(db, userId);
 
@@ -135,19 +149,16 @@
                     const data = docSnap.data();
                     console.log("Loaded existing data:", data);
                     
-                    // Restore responses and scores
                     userResponses = data.responses || {};
                     currentScores = data.scores || {};
                     latestTimestamp = data.timestamp ? new Date(data.timestamp.seconds * 1000) : null;
 
-                    // Update UI elements
                     renderQuiz();
-                    drawRadarChart(currentScores); // 로드된 데이터로 그래프 업데이트
-                    updateScoreSummary(); // 로드된 데이터로 점수 요약 업데이트
+                    drawRadarChart(currentScores); 
+                    updateScoreSummary(); 
                     updateResultDisplay();
                 } else {
                     console.log("No saved data found for this user.");
-                    // 데이터가 없을 경우 0점으로 초기화하고 UI 업데이트
                     COMPETENCIES.forEach(c => currentScores[c.id] = 0);
                     updateScoreSummary(); 
                     drawRadarChart(currentScores);
@@ -160,8 +171,8 @@
         }
 
         async function saveScores(scores, responses) {
-            if (!db || !userId || userId === 'anonymous') {
-                document.getElementById('status-message').innerText = '저장 오류: 인증이 완료되지 않아 데이터를 저장할 수 없습니다.';
+            if (!isFirebaseActive) {
+                document.getElementById('status-message').innerHTML = '<span class="text-red-600 font-bold">저장 불가:</span> 로컬 모드로 실행 중입니다.';
                 return;
             }
             
@@ -217,10 +228,14 @@
             if (totalCompletedQuestions === QUESTIONS.length) {
                 // All answered, save and update graph
                 saveScores(currentScores, userResponses);
-                document.getElementById('status-message').innerText = '모든 문항에 응답했습니다. 결과가 저장되었습니다.';
+                if (isFirebaseActive) {
+                    document.getElementById('status-message').innerText = '모든 문항에 응답했습니다. 결과가 저장되었습니다.';
+                }
             } else {
                 // Not all answered, just update the graph preview
-                document.getElementById('status-message').innerText = '응답한 문항을 기준으로 레이더 그래프가 업데이트되었습니다.';
+                if (isFirebaseActive) {
+                    document.getElementById('status-message').innerText = '응답한 문항을 기준으로 레이더 그래프가 업데이트되었습니다.';
+                }
             }
         }
 
@@ -368,10 +383,11 @@
         
         function updateResultDisplay() {
              const statusElement = document.getElementById('status-message');
+             if (!isFirebaseActive) return; // 로컬 모드에서는 별도의 메시지 표시
+
              if (latestTimestamp) {
                 statusElement.innerHTML = `<span class="text-green-600 font-bold">저장됨:</span> ${latestTimestamp.toLocaleString('ko-KR')} 기준의 결과입니다.`;
              } else if (Object.keys(currentScores).length > 0) {
-                 // The graph is drawn but not saved yet
                  statusElement.innerHTML = `현재 진행 중인 응답을 반영하고 있습니다.`;
              } else {
                 statusElement.innerHTML = `응답을 시작하면 결과가 자동으로 저장되고 업데이트됩니다.`;
