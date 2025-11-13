@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>설계자 핵심 역량 진단</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script type="module">
+        // Firebase CDN Imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Firestore 로깅 활성화 (디버그용)
+        setLogLevel('Debug');
+
+        // Global Firebase Variables (Provided by Canvas Environment)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        let firebaseConfig = {};
+        if (typeof __firebase_config !== 'undefined') {
+            try {
+                firebaseConfig = JSON.parse(__firebase_config);
+            } catch (e) {
+                console.error("Failed to parse firebase config:", e);
+            }
+        }
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db;
+        let auth;
+        let userId = 'anonymous';
+        let chartInstance = null;
+        const COLLECTION_NAME = 'designer_skills';
+        const DOCUMENT_ID = 'user_scores';
+
+        // 6가지 핵심 역량 정의
+        const COMPETENCIES = [
+            { id: 'fundamentals', label: '공학적 기본기' },
+            { id: 'costManagement', label: '비용/일정 관리 능력' },
+            { id: 'manufacturing', label: '제조 이해도' },
+            { id: 'communication', label: '소통 및 협업' },
+            { id: 'problemSolving', label: '문제 해결력 및 의사결정' },
+            { id: 'documentation', label: '문서화 능력' }
+        ];
+
+        // 퀴즈 문항 (각 역량별 3문항)
+        const QUESTIONS = [
+            // 공학적 기본기 (fundamentals)
+            { id: 'q1', competencyId: 'fundamentals', text: '기본적인 물리/수학 원리를 설계에 적용할 수 있다.' },
+            { id: 'q2', competencyId: 'fundamentals', text: '최신 기술 동향을 이해하고 설계에 활용하는 데 익숙하다.' },
+            { id: 'q3', competencyId: 'fundamentals', text: '부품 및 재료의 특성을 정확히 이해하고 선택할 수 있다.' },
+            // 비용/일정 관리 능력 (costManagement)
+            { id: 'q4', competencyId: 'costManagement', text: '설계 단계부터 제조 비용을 예측하고 절감 방안을 제시할 수 있다.' },
+            { id: 'q5', competencyId: 'costManagement', text: '프로젝트 일정을 현실적으로 계획하고, 마감 기한을 준수한다.' },
+            { id: 'q6', competencyId: 'costManagement', text: '예기치 않은 문제 발생 시 일정 및 비용 계획을 효과적으로 조정한다.' },
+            // 제조 이해도 (manufacturing)
+            { id: 'q7', competencyId: 'manufacturing', text: '다양한 제조 공정(가공, 주조, 사출 등)의 제약 조건을 숙지하고 있다.' },
+            { id: 'q8', competencyId: 'manufacturing', text: '설계가 현장에서 쉽게 제작되고 조립될 수 있도록 고려한다.' },
+            { id: 'q9', competencyId: 'manufacturing', text: '공정 개선을 통해 제품 품질 및 생산성을 높이는 방안을 모색한다.' },
+            // 소통 및 협업 (communication)
+            { id: 'q10', competencyId: 'communication', text: '비전문가에게도 설계 아이디어를 명확하고 설득력 있게 설명할 수 있다.' },
+            { id: 'q11', competencyId: 'communication', text: '팀원들의 피드백을 수용하고 건설적인 논의를 통해 설계를 개선한다.' },
+            { id: 'q12', competencyId: 'communication', text: '유관 부서(영업, 생산, 품질 등)와 원활하게 소통하여 요구사항을 반영한다.' },
+            // 문제 해결력 및 의사결정 (problemSolving)
+            { id: 'q13', competencyId: 'problemSolving', text: '설계 중 발생하는 기술적 난제에 대해 체계적인 분석을 통해 해결책을 찾는다.' },
+            { id: 'q14', competencyId: 'problemSolving', text: '불확실한 상황에서도 필요한 정보를 바탕으로 신속하게 결정을 내린다.' },
+            { id: 'q15', competencyId: 'problemSolving', text: '실패 사례를 학습하여 유사한 문제가 재발하는 것을 방지한다.' },
+            // 문서화 능력 (documentation)
+            { id: 'q16', competencyId: 'documentation', text: '설계 의도, 결정 사항, 계산 근거 등을 명확하게 기록하고 관리한다.' },
+            { id: 'q17', competencyId: 'documentation', text: '도면 및 기술 문서를 산업 표준 및 사양에 맞춰 정확하게 작성한다.' },
+            { id: 'q18', competencyId: 'documentation', text: '동료나 후임자가 문서를 쉽게 이해하고 활용할 수 있도록 정리한다.' }
+        ];
+
+        // 상태 관리
+        let userResponses = {};
+        let currentScores = {};
+        let latestTimestamp = null;
+
+        // --- Firebase/Auth/Firestore Initialization and Data Handling ---
+
+        async function initFirebase() {
+            try {
+                const app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+
+                // Set persistence to local storage
+                await setPersistence(auth, browserLocalPersistence);
+
+                // Initial authentication check
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                // Listen for Auth state changes
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        document.getElementById('user-info').innerText = `사용자 ID: ${userId}`;
+                        setupFirestoreListener();
+                        renderQuiz(); // Render quiz once auth is ready
+                    } else {
+                        // User is signed out or anonymous
+                        userId = crypto.randomUUID(); // Fallback for anonymous state if sign-in fails
+                        document.getElementById('user-info').innerText = `사용자 ID: (익명) ${userId.substring(0, 8)}...`;
+                        renderQuiz(); // Render quiz even without full auth
+                    }
+                    renderScoreSummary(); // Initialize the score list structure
+                });
+            } catch (error) {
+                console.error("Firebase initialization or sign-in failed:", error);
+                document.getElementById('status-message').innerText = '오류: Firebase 로드 실패. 데이터를 저장할 수 없습니다.';
+                renderQuiz();
+                renderScoreSummary();
+            }
+        }
+
+        function getPrivateDocRef(dbInstance, uid) {
+            // Path: /artifacts/{appId}/users/{userId}/designer_skills/user_scores
+            return doc(dbInstance, 'artifacts', appId, 'users', uid, COLLECTION_NAME, DOCUMENT_ID);
+        }
+
+        function setupFirestoreListener() {
+            if (!db || !userId || userId === 'anonymous') return;
+
+            const docRef = getPrivateDocRef(db, userId);
+
+            // Real-time listener for user scores
+            onSnapshot(docRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    console.log("Loaded existing data:", data);
+                    
+                    // Restore responses and scores
+                    userResponses = data.responses || {};
+                    currentScores = data.scores || {};
+                    latestTimestamp = data.timestamp ? new Date(data.timestamp.seconds * 1000) : null;
+
+                    // Update UI elements
+                    renderQuiz();
+                    drawRadarChart(currentScores); // 로드된 데이터로 그래프 업데이트
+                    updateScoreSummary(); // 로드된 데이터로 점수 요약 업데이트
+                    updateResultDisplay();
+                } else {
+                    console.log("No saved data found for this user.");
+                    // 데이터가 없을 경우 0점으로 초기화하고 UI 업데이트
+                    COMPETENCIES.forEach(c => currentScores[c.id] = 0);
+                    updateScoreSummary(); 
+                    drawRadarChart(currentScores);
+                    updateResultDisplay();
+                }
+            }, (error) => {
+                console.error("Firestore snapshot error:", error);
+                document.getElementById('status-message').innerText = '오류: 데이터를 불러오는 데 실패했습니다.';
+            });
+        }
+
+        async function saveScores(scores, responses) {
+            if (!db || !userId || userId === 'anonymous') {
+                document.getElementById('status-message').innerText = '저장 오류: 인증이 완료되지 않아 데이터를 저장할 수 없습니다.';
+                return;
+            }
+            
+            const dataToSave = {
+                scores: scores,
+                responses: responses,
+                timestamp: new Date()
+            };
+
+            try {
+                const docRef = getPrivateDocRef(db, userId);
+                await setDoc(docRef, dataToSave, { merge: false });
+                document.getElementById('status-message').innerText = '결과가 성공적으로 저장되었습니다.';
+            } catch (error) {
+                console.error("Error saving data:", error);
+                document.getElementById('status-message').innerText = '저장 오류: 데이터를 저장하는 중 문제가 발생했습니다.';
+            }
+        }
+
+        // --- Core Logic ---
+
+        function calculateScores() {
+            const scores = {};
+            COMPETENCIES.forEach(comp => {
+                scores[comp.id] = 0;
+            });
+
+            let totalCompletedQuestions = 0;
+
+            QUESTIONS.forEach(q => {
+                const responseValue = userResponses[q.id];
+                if (responseValue) {
+                    scores[q.competencyId] += responseValue;
+                    totalCompletedQuestions++;
+                }
+            });
+
+            // Normalize scores to a 0-5 scale
+            const normalizedScores = {};
+            COMPETENCIES.forEach(comp => {
+                // Max possible score for 3 questions: 3 * 5 = 15
+                // Normalize: score / 3
+                normalizedScores[comp.id] = scores[comp.id] / 3;
+            });
+            
+            currentScores = normalizedScores;
+            
+            // 모든 점수 업데이트 로직 호출
+            drawRadarChart(currentScores);
+            updateScoreSummary();
+
+            // Check if all questions are answered
+            if (totalCompletedQuestions === QUESTIONS.length) {
+                // All answered, save and update graph
+                saveScores(currentScores, userResponses);
+                document.getElementById('status-message').innerText = '모든 문항에 응답했습니다. 결과가 저장되었습니다.';
+            } else {
+                // Not all answered, just update the graph preview
+                document.getElementById('status-message').innerText = '응답한 문항을 기준으로 레이더 그래프가 업데이트되었습니다.';
+            }
+        }
+
+        function handleResponseChange(event) {
+            const questionId = event.target.name;
+            const value = parseInt(event.target.value, 10);
+            userResponses[questionId] = value;
+            calculateScores();
+        }
+
+        // --- Rendering ---
+        
+        // 역량별 요약 목록 구조를 동적으로 렌더링
+        function renderScoreSummary() {
+            const listContainer = document.getElementById('score-summary-list');
+            if (!listContainer) return;
+            
+            const summaryHtml = COMPETENCIES.map(c => `
+                <li class="flex justify-between items-center p-3 bg-indigo-50 rounded-lg shadow-sm">
+                    <span class="font-medium text-lg text-indigo-800">${c.label}</span>
+                    <span id="score-${c.id}" class="text-2xl font-extrabold text-indigo-600">0.0</span>
+                </li>
+            `).join('');
+
+            listContainer.innerHTML = summaryHtml;
+            updateScoreSummary(); // 초기 점수를 0.0으로 설정하거나 불러온 값으로 설정
+        }
+
+        function updateScoreSummary() {
+            COMPETENCIES.forEach(comp => {
+                const scoreElement = document.getElementById(`score-${comp.id}`);
+                const score = currentScores[comp.id] || 0;
+                if (scoreElement) {
+                    // 점수를 소수점 첫째 자리까지 표시
+                    scoreElement.innerText = score.toFixed(1); 
+                }
+            });
+        }
+
+
+        function renderQuiz() {
+            const quizContainer = document.getElementById('quiz-container');
+            if (!quizContainer) return;
+
+            quizContainer.innerHTML = ''; // Clear previous content
+
+            QUESTIONS.forEach((q, index) => {
+                const isChecked = (val) => userResponses[q.id] === val ? 'checked' : '';
+
+                const questionHtml = `
+                    <div class="p-4 mb-4 bg-white rounded-xl shadow-lg transition-all hover:shadow-xl">
+                        <p class="font-semibold text-lg mb-3 text-gray-800">${index + 1}. [${COMPETENCIES.find(c => c.id === q.competencyId).label}] ${q.text}</p>
+                        <div class="flex justify-between items-center text-sm font-medium text-gray-600 space-x-2">
+                            <span class="w-1/5 text-center text-red-600">1 (매우 그렇지 않다)</span>
+                            <div class="flex-grow flex justify-between space-x-1">
+                                ${[1, 2, 3, 4, 5].map(val => `
+                                    <label class="flex flex-col items-center cursor-pointer p-1 rounded-md transition-colors hover:bg-indigo-50 active:bg-indigo-100">
+                                        <input type="radio" name="${q.id}" value="${val}" ${isChecked(val)} 
+                                            class="form-radio h-4 w-4 text-indigo-600 focus:ring-indigo-500" 
+                                            onchange="window.handleResponseChange(event)">
+                                        <span class="mt-1">${val}</span>
+                                    </label>
+                                `).join('')}
+                            </div>
+                            <span class="w-1/5 text-center text-indigo-600">5 (매우 그렇다)</span>
+                        </div>
+                    </div>
+                `;
+                quizContainer.innerHTML += questionHtml;
+            });
+        }
+
+        function drawRadarChart(scores) {
+            const ctx = document.getElementById('radar-chart').getContext('2d');
+            const labels = COMPETENCIES.map(c => c.label);
+            const dataValues = COMPETENCIES.map(c => scores[c.id] || 0);
+            
+            // 데이터셋이 없으면 빈 배열로 처리
+            if (dataValues.every(v => v === 0) && dataValues.length > 0) {
+                 document.getElementById('result-message').innerText = '응답을 기다리고 있습니다...';
+            } else {
+                document.getElementById('result-message').innerText = '최신 진단 결과';
+            }
+
+            if (chartInstance) {
+                chartInstance.destroy();
+            }
+
+            chartInstance = new Chart(ctx, {
+                type: 'radar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: '나의 역량 점수 (최대 5점)',
+                        data: dataValues,
+                        backgroundColor: 'rgba(99, 102, 241, 0.4)', // indigo-500
+                        borderColor: 'rgba(79, 70, 229, 1)', // indigo-600
+                        pointBackgroundColor: 'rgba(79, 70, 229, 1)',
+                        pointBorderColor: '#fff',
+                        pointHoverBackgroundColor: '#fff',
+                        pointHoverBorderColor: 'rgba(79, 70, 229, 1)',
+                        borderWidth: 2,
+                        tension: 0.1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        r: {
+                            angleLines: { color: 'rgba(0, 0, 0, 0.1)' },
+                            grid: { color: 'rgba(0, 0, 0, 0.1)' },
+                            pointLabels: {
+                                font: { size: 14, family: 'Inter, sans-serif' },
+                                color: '#374151'
+                            },
+                            suggestedMin: 0,
+                            suggestedMax: 5,
+                            ticks: {
+                                stepSize: 1,
+                                backdropColor: 'rgba(255, 255, 255, 0.7)',
+                                color: '#6B7280',
+                                showLabelBackdrop: true,
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            labels: {
+                                font: { size: 16 }
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: (context) => {
+                                    return `${context.dataset.label}: ${context.formattedValue.toFixed(1)}점`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        
+        function updateResultDisplay() {
+             const statusElement = document.getElementById('status-message');
+             if (latestTimestamp) {
+                statusElement.innerHTML = `<span class="text-green-600 font-bold">저장됨:</span> ${latestTimestamp.toLocaleString('ko-KR')} 기준의 결과입니다.`;
+             } else if (Object.keys(currentScores).length > 0) {
+                 // The graph is drawn but not saved yet
+                 statusElement.innerHTML = `현재 진행 중인 응답을 반영하고 있습니다.`;
+             } else {
+                statusElement.innerHTML = `응답을 시작하면 결과가 자동으로 저장되고 업데이트됩니다.`;
+             }
+        }
+
+
+        // Expose function to global scope for use in inline event listeners
+        window.handleResponseChange = handleResponseChange;
+
+        // Initialize on window load
+        window.onload = initFirebase;
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body {
+            font-family: 'Inter', 'Malgun Gothic', 'Dotum', sans-serif;
+            background-color: #f3f4f6; /* Gray-100 */
+        }
+        #radar-chart {
+            width: 100%;
+            height: 400px;
+            max-height: 50vh;
+        }
+        /* Custom radio button styles for better visibility */
+        input[type="radio"]:checked {
+            filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.1));
+        }
+        @media (min-width: 1024px) {
+            #radar-chart {
+                height: 500px;
+                max-height: 70vh;
+            }
+        }
+    </style>
+</head>
+<body class="p-4 lg:p-10">
+    <div class="max-w-6xl mx-auto">
+        <header class="text-center mb-8 p-6 bg-white rounded-2xl shadow-xl">
+            <h1 class="text-4xl font-extrabold text-indigo-700 mb-2">설계자 핵심 역량 자가진단</h1>
+            <p class="text-xl text-gray-600">좋은 설계자가 되기 위한 6가지 핵심 역량을 진단해 보세요.</p>
+            <div id="user-info" class="text-sm text-gray-400 mt-2">사용자 ID 로딩 중...</div>
+        </header>
+
+        <!-- 결과 및 그래프 섹션 -->
+        <div class="grid lg:grid-cols-2 gap-8 mb-10">
+            <!-- 퀴즈 상태/결과 메시지 -->
+            <div class="lg:col-span-2 p-4 bg-yellow-100 border-l-4 border-yellow-500 rounded-lg shadow-md">
+                 <p id="status-message" class="text-sm font-medium text-yellow-800">초기화 중...</p>
+            </div>
+            
+            <!-- 레이더 그래프 -->
+            <div class="bg-white p-6 rounded-2xl shadow-xl">
+                <h2 id="result-message" class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">결과 그래프</h2>
+                <div class="flex justify-center items-center" style="min-height: 350px;">
+                    <canvas id="radar-chart"></canvas>
+                </div>
+                <p class="mt-4 text-center text-sm text-gray-500">점수는 1점(최소)부터 5점(최대)까지 정규화된 값입니다.</p>
+            </div>
+
+            <!-- 역량 설명 및 점수 요약 -->
+            <div class="bg-white p-6 rounded-2xl shadow-xl">
+                <h2 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">역량별 진단 요약</h2>
+                <ul id="score-summary-list" class="space-y-3">
+                    <!-- JavaScript가 여기에 역량 목록을 생성합니다. -->
+                </ul>
+                <div class="mt-6 p-4 bg-gray-100 rounded-lg">
+                    <h3 class="font-semibold text-gray-700 mb-2">진단 해석</h3>
+                    <p class="text-sm text-gray-600">
+                        레이더 그래프는 각 역량의 균형과 강점을 시각적으로 보여줍니다. 5점에 가까울수록 해당 역량이 높다는 의미이며, 균형 잡힌 그래프는 전반적인 역량이 고루 발달했음을 나타냅니다.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 퀴즈 섹션 -->
+        <div class="mt-10 p-6 bg-white rounded-2xl shadow-xl">
+            <h2 class="text-3xl font-bold text-gray-800 mb-6 border-b pb-3">자가 진단 퀴즈 (1점: 매우 그렇지 않다 ~ 5점: 매우 그렇다)</h2>
+            <div id="quiz-container">
+                <!-- 퀴즈 문항이 JavaScript에 의해 여기에 렌더링됩니다. -->
+                <p class="text-center text-gray-500 py-10">퀴즈 문항 로딩 중...</p>
+            </div>
+        </div>
+
+    </div>
+</body>
+</html>
